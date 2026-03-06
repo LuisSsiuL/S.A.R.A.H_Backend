@@ -61,10 +61,10 @@ async def execute_query(sql_query: str) -> list[dict]:
 
 from typing import Optional
 
-async def get_cached_sql(embedding: list[float], threshold: float = 0.95) -> Optional[str]:
+async def get_cached_sql(embedding: list[float], threshold: float = 0.95) -> Optional[tuple[int, str]]:
     """
     Searches the query_cache table using pgvector cosine distance.
-    Returns the cached SQL string if the similarity (1 - distance) is > threshold.
+    Returns (id, cached_sql_string) if the similarity (1 - distance) is > threshold.
     """
     global pool
     if not pool:
@@ -75,7 +75,7 @@ async def get_cached_sql(embedding: list[float], threshold: float = 0.95) -> Opt
     vec_str = f"[{','.join(map(str, embedding))}]"
     
     query = """
-    SELECT generated_sql 
+    SELECT id, generated_sql 
     FROM query_cache 
     WHERE 1 - (message_embedding <=> $1::vector) > $2 
     ORDER BY message_embedding <=> $1::vector 
@@ -87,7 +87,7 @@ async def get_cached_sql(embedding: list[float], threshold: float = 0.95) -> Opt
             result = await connection.fetchrow(query, vec_str, threshold)
             if result:
                 logger.info("🎯 Cache HIT: Found semantically similar query.")
-                return result['generated_sql']
+                return (result['id'], result['generated_sql'])
             logger.info("❌ Cache MISS: No similar query found.")
             return None
     except Exception as e:
@@ -95,22 +95,47 @@ async def get_cached_sql(embedding: list[float], threshold: float = 0.95) -> Opt
         return None
 
 
-async def save_to_cache(user_message: str, embedding: list[float], sql: str):
-    """Saves a successfully generated SQL query and its embedding to the cache."""
+async def save_to_cache(user_message: str, embedding: list[float], sql: str) -> Optional[int]:
+    """Saves a successfully generated SQL query and its embedding to the cache and returns the new ID."""
     global pool
     if not pool:
-        return
+        return None
 
     vec_str = f"[{','.join(map(str, embedding))}]"
     
     query = """
     INSERT INTO query_cache (user_message, message_embedding, generated_sql)
     VALUES ($1, $2::vector, $3)
+    RETURNING id
     """
     
     try:
         async with pool.acquire() as connection:
-            await connection.execute(query, user_message, vec_str, sql)
+            row_id = await connection.fetchval(query, user_message, vec_str, sql)
             logger.info("💾 Saved query to semantic cache.")
+            return row_id
     except Exception as e:
         logger.error(f"Failed to save to cache: {e}")
+        return None
+
+
+async def update_feedback(cache_id: int, feedback_value: int) -> bool:
+    """Updates the feedback score for a cached query (+1/-1)."""
+    global pool
+    if not pool:
+        return False
+        
+    query = """
+    UPDATE query_cache 
+    SET feedback = feedback + $2
+    WHERE id = $1
+    """
+    
+    try:
+        async with pool.acquire() as connection:
+            await connection.execute(query, cache_id, feedback_value)
+            logger.info(f"Feedback updated for cache ID {cache_id}.")
+            return True
+    except Exception as e:
+        logger.error(f"Failed to update feedback: {e}")
+        return False

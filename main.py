@@ -59,6 +59,10 @@ class QueryRequest(BaseModel):
     message: str
     role: str = "Sales"
 
+class FeedbackRequest(BaseModel):
+    cache_id: int
+    feedback_value: int  # e.g., +1 or -1
+
 class QueryResponse(BaseModel):
     text: str
     table: str
@@ -100,6 +104,21 @@ async def get_table_data(table_name: str):
     except Exception as e:
         logger.error(f"Error fetching table {table_name}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/feedback")
+async def give_feedback(request: FeedbackRequest):
+    """
+    Accepts feedback (+1 or -1) for a specific query cache ID.
+    """
+    try:
+        from database import update_feedback
+        success = await update_feedback(request.cache_id, request.feedback_value)
+        if not success:
+            raise HTTPException(status_code=400, detail="Failed to update feedback. Invalid cache ID or database error.")
+        return {"status": "success", "message": "Feedback recorded."}
+    except Exception as e:
+        logger.error(f"Error handling feedback: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error while processing feedback.")
 
 if __name__ == "__main__":
     import uvicorn

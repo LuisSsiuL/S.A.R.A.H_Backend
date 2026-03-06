@@ -144,8 +144,11 @@ async def process_user_query(message: str, role: str):
     from database import get_cached_sql, save_to_cache
     
     cached_sql = None
+    cache_id = None
     if embedding is not None:
-        cached_sql = await get_cached_sql(embedding, threshold=0.95)
+        cache_result = await get_cached_sql(embedding, threshold=0.95)
+        if cache_result:
+            cache_id, cached_sql = cache_result
     
     generated_sql = ""
     if cached_sql:
@@ -186,7 +189,7 @@ async def process_user_query(message: str, role: str):
                 
                 # If we get here, execution succeeded
                 if embedding is not None:
-                    await save_to_cache(message, embedding, generated_sql)
+                    cache_id = await save_to_cache(message, embedding, generated_sql)
                 break 
                 
             except Exception as e:
@@ -214,7 +217,8 @@ async def process_user_query(message: str, role: str):
     data_chunk = {
         "type": "data",
         "table": "", # Frontend will handle raw JSON mapping later if we implement it, for now we let Explainer make the markdown
-        "sql": generated_sql
+        "sql": generated_sql,
+        "cache_id": cache_id
     }
     yield json.dumps(data_chunk)
 
