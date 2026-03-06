@@ -77,9 +77,12 @@ async def query_ai(request: QueryRequest):
     and returns Server-Sent Events (SSE) streaming.
     """
     try:
-        from sse_starlette.sse import EventSourceResponse
-        # Return the AsyncGenerator as an SSE stream directly
-        return EventSourceResponse(process_user_query(request.message, request.role))
+        from fastapi.responses import StreamingResponse
+        # Use FastAPI's native StreamingResponse with text/event-stream
+        return StreamingResponse(
+            process_user_query(request.message, request.role),
+            media_type="text/event-stream"
+        )
     except Exception as e:
         logger.error(f"Error handling query stream initialization: {e}")
         raise HTTPException(status_code=500, detail="Internal server error while initializing stream.")
