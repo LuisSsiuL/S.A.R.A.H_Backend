@@ -127,7 +127,7 @@ async def process_user_query(message: str, role: str):
         embedding = embed_res.data[0].embedding
     except Exception as e:
         logger.error(f"Embedding failed: {e}")
-        yield f"data: {json.dumps({'type': 'text', 'content': 'Gagal membuat vektor pencarian.'})}\n\n"
+        yield json.dumps({'type': 'text', 'content': 'Gagal membuat vektor pencarian.'})
         return
 
     # 1. Semantic Cache Check
@@ -164,8 +164,8 @@ async def process_user_query(message: str, role: str):
                 
                 # Sub-check for warehouse admin restriction hit
                 if "Akses ditolak" in generated_sql:
-                    yield f"data: {json.dumps({'type': 'data', 'table': '', 'sql': 'BLOCKED'})}\n\n"
-                    yield f"data: {json.dumps({'type': 'text', 'content': generated_sql})}\n\n"
+                    yield json.dumps({'type': 'data', 'table': '', 'sql': 'BLOCKED'})
+                    yield json.dumps({'type': 'text', 'content': generated_sql})
                     return
 
                 # Assuming valid syntax, check against DB natively
@@ -183,8 +183,8 @@ async def process_user_query(message: str, role: str):
 
         if attempt > max_retries and error_feedback:
             # We failed after retrying
-            yield f"data: {json.dumps({'type': 'data', 'table': '', 'sql': generated_sql})}\n\n"
-            yield f"data: {json.dumps({'type': 'text', 'content': f'Maaf, saya gagal menjalankan query setelah 3 percobaan. Error terakhir: {error_feedback}'})}\n\n"
+            yield json.dumps({'type': 'data', 'table': '', 'sql': generated_sql})
+            yield json.dumps({'type': 'text', 'content': f'Maaf, saya gagal menjalankan query setelah 3 percobaan. Error terakhir: {error_feedback}'})
             return
 
     # --- STAGE 3: DATA RETRIEVAL ---
@@ -194,7 +194,7 @@ async def process_user_query(message: str, role: str):
         query_results = await stage_3_sql_execution(generated_sql)
     except Exception as e:
         logger.error(f"Final execution failed (perhaps cached query broke): {e}")
-        yield f"data: {json.dumps({'type': 'text', 'content': 'Error saat menjalankan query dari cache.'})}\n\n"
+        yield json.dumps({'type': 'text', 'content': 'Error saat menjalankan query dari cache.'})
         return
 
     # Yield Data & SQL Chunk First
@@ -203,7 +203,7 @@ async def process_user_query(message: str, role: str):
         "table": "", # Frontend will handle raw JSON mapping later if we implement it, for now we let Explainer make the markdown
         "sql": generated_sql
     }
-    yield f"data: {json.dumps(data_chunk)}\n\n"
+    yield json.dumps(data_chunk)
 
     # --- STAGE 4: EXPLAINER (STREAMING) ---
     logger.info("Stage 4 (Explainer Streaming) started")
@@ -227,10 +227,10 @@ async def process_user_query(message: str, role: str):
         async for chunk in response:
             if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
                 text_chunk = {"type": "text", "content": chunk.choices[0].delta.content}
-                yield f"data: {json.dumps(text_chunk)}\n\n"
+                yield json.dumps(text_chunk)
                 
     except Exception as e:
         logger.error(f"Streaming explainer failed: {e}")
-        yield f"data: {json.dumps({'type': 'text', 'content': 'Terdapat masalah teknis dalam menerjemahkan output data.'})}\n\n"
+        yield json.dumps({'type': 'text', 'content': 'Terdapat masalah teknis dalam menerjemahkan output data.'})
         
     logger.info("process_user_query stream finished")
