@@ -70,18 +70,19 @@ async def health_check():
     """Healthcheck endpoint."""
     return {"status": "healthy"}
 
-@app.post("/api/query", response_model=QueryResponse)
+@app.post("/api/query")
 async def query_ai(request: QueryRequest):
     """
     Accepts user question and role, processes via LLM Pipeline against the DB,
-    and returns explanation + data.
+    and returns Server-Sent Events (SSE) streaming.
     """
     try:
-        result = await process_user_query(request.message, request.role)
-        return QueryResponse(**result)
+        from sse_starlette.sse import EventSourceResponse
+        # Return the AsyncGenerator as an SSE stream directly
+        return EventSourceResponse(process_user_query(request.message, request.role))
     except Exception as e:
-        logger.error(f"Error handling query: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error while processing query.")
+        logger.error(f"Error handling query stream initialization: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error while initializing stream.")
 
 @app.get("/api/data/{table_name}")
 async def get_table_data(table_name: str):

@@ -6,3 +6,4 @@ pydantic>=2.7.2
 python-dotenv>=1.0.1
 supabase>=2.5.0
 gunicorn>=22.0.0
+sse-starlette>=2.1.0

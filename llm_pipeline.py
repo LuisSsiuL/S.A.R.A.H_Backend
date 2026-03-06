@@ -109,73 +109,128 @@ async def stage_4_explainer(client: AsyncOpenAI, user_message: str, data: list[d
         }
 
 
-async def process_user_query(message: str, role: str) -> dict:
-    """Orchestrates the 4-stage Text-to-SQL logic."""
+async def process_user_query(message: str, role: str):
+    """
+    Orchestrates the Text-to-SQL logic using Semantic Caching and SSE Streaming.
+    Yields Server-Sent Events directly.
+    """
     logger.info("process_user_query started")
     client = get_llm_client()
     
-    # --- STAGE 1: INTENT & SCHEMA ---
-    logger.info("Stage 1 started")
-    domains = await stage_1_intent_classification(client, message)
-    logger.info(f"Stage 1 finished: {domains}")
-    schema_context = "\n\n".join([SCHEMA_MAPPING.get(d, "") for d in domains])
-    if not schema_context.strip():
-        schema_context = SCHEMA_MAPPING["sales"] # Fallback
+    # 0. Generate Embedding for Semantic Cache
+    logger.info("Generating embedding for user message...")
+    try:
+        embed_res = await client.embeddings.create(
+            model="text-embedding-3-small", 
+            input=message
+        )
+        embedding = embed_res.data[0].embedding
+    except Exception as e:
+        logger.error(f"Embedding failed: {e}")
+        yield f"data: {json.dumps({'type': 'text', 'content': 'Gagal membuat vektor pencarian.'})}\n\n"
+        return
 
-    # --- STAGE 2 & 3: GENERATION & EXECUTION (WITH RETRIES) ---
-    max_retries = 2
-    attempt = 0
+    # 1. Semantic Cache Check
+    logger.info("Checking semantic cache...")
+    from database import get_cached_sql, save_to_cache
+    cached_sql = await get_cached_sql(embedding, threshold=0.95)
+    
     generated_sql = ""
-    error_feedback = None
+    if cached_sql:
+        generated_sql = cached_sql
+        # Provide schema context for Explainer
+        schema_context = "CACHED_QUERY" 
+    else:
+        # --- STAGE 1: INTENT & SCHEMA ---
+        logger.info("Stage 1 started")
+        domains = await stage_1_intent_classification(client, message)
+        logger.info(f"Stage 1 finished: {domains}")
+        schema_context = "\n\n".join([SCHEMA_MAPPING.get(d, "") for d in domains])
+        if not schema_context.strip():
+            schema_context = SCHEMA_MAPPING["sales"] # Fallback
+
+        # --- STAGE 2: SQL GENERATION (WITH RETRIES) ---
+        max_retries = 2
+        attempt = 0
+        error_feedback = None
+        
+        while attempt <= max_retries:
+            try:
+                # Stage 2
+                logger.info(f"Stage 2 started (Attempt {attempt})")
+                sql_response = await stage_2_sql_generation(client, schema_context, message, role, error_feedback)
+                logger.info("Stage 2 finished")
+                generated_sql = sql_response.get("sql", "")
+                
+                # Sub-check for warehouse admin restriction hit
+                if "Akses ditolak" in generated_sql:
+                    yield f"data: {json.dumps({'type': 'data', 'table': '', 'sql': 'BLOCKED'})}\n\n"
+                    yield f"data: {json.dumps({'type': 'text', 'content': generated_sql})}\n\n"
+                    return
+
+                # Assuming valid syntax, check against DB natively
+                logger.info(f"Stage 3 started (Dry Run / Test)")
+                test_results = await stage_3_sql_execution(generated_sql)
+                
+                # If we get here, execution succeeded
+                await save_to_cache(message, embedding, generated_sql)
+                break 
+                
+            except Exception as e:
+                error_feedback = str(e)
+                logger.warning(f"SQL Execution failed on attempt {attempt}: {error_feedback}. Retrying...")
+                attempt += 1
+
+        if attempt > max_retries and error_feedback:
+            # We failed after retrying
+            yield f"data: {json.dumps({'type': 'data', 'table': '', 'sql': generated_sql})}\n\n"
+            yield f"data: {json.dumps({'type': 'text', 'content': f'Maaf, saya gagal menjalankan query setelah 3 percobaan. Error terakhir: {error_feedback}'})}\n\n"
+            return
+
+    # --- STAGE 3: DATA RETRIEVAL ---
+    logger.info("Executing final SQL...")
     query_results = []
-    
-    while attempt <= max_retries:
-        try:
-            # Stage 2
-            logger.info(f"Stage 2 started (Attempt {attempt})")
-            sql_response = await stage_2_sql_generation(client, schema_context, message, role, error_feedback)
-            logger.info("Stage 2 finished")
-            generated_sql = sql_response.get("sql", "")
-            
-            # Sub-check for warehouse admin restriction hit
-            if "Akses ditolak" in generated_sql:
-                return {
-                    "text": generated_sql,
-                    "table": "",
-                    "sql": "BLOCKED",
-                    "database": "FURNITURE_MOCK"
-                }
+    try:
+        query_results = await stage_3_sql_execution(generated_sql)
+    except Exception as e:
+        logger.error(f"Final execution failed (perhaps cached query broke): {e}")
+        yield f"data: {json.dumps({'type': 'text', 'content': 'Error saat menjalankan query dari cache.'})}\n\n"
+        return
 
-            # Stage 3
-            logger.info(f"Stage 3 started")
-            query_results = await stage_3_sql_execution(generated_sql)
-            logger.info(f"Stage 3 finished (Records: {len(query_results)})")
-            
-            # If we get here, execution succeeded
-            break 
-            
-        except Exception as e:
-            error_feedback = str(e)
-            logger.warning(f"SQL Execution failed on attempt {attempt}: {error_feedback}. Retrying...")
-            attempt += 1
-
-    if attempt > max_retries and error_feedback:
-        # We failed after retrying
-        return {
-            "text": f"Maaf, saya gagal menjalankan query setelah 3 percobaan. Error terakhir: {error_feedback}",
-            "table": "",
-            "sql": generated_sql,
-            "database": "FURNITURE_MOCK"
-        }
-
-    # --- STAGE 4: EXPLAINER ---
-    logger.info(f"Stage 4 started")
-    final_output = await stage_4_explainer(client, message, query_results, generated_sql)
-    logger.info(f"Stage 4 finished, preparing return payload")
-    
-    return {
-        "text": final_output.get("text", ""),
-        "table": final_output.get("table", ""),
-        "sql": generated_sql,
-        "database": "FURNITURE_MOCK"
+    # Yield Data & SQL Chunk First
+    data_chunk = {
+        "type": "data",
+        "table": "", # Frontend will handle raw JSON mapping later if we implement it, for now we let Explainer make the markdown
+        "sql": generated_sql
     }
+    yield f"data: {json.dumps(data_chunk)}\n\n"
+
+    # --- STAGE 4: EXPLAINER (STREAMING) ---
+    logger.info("Stage 4 (Explainer Streaming) started")
+    prompt = (
+        f"Original Request: {message}\n"
+        f"Executed SQL: {generated_sql}\n"
+        f"Query Results: {json.dumps(query_results, default=str)}\n"
+    )
+
+    try:
+        response = await client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": EXPLAINER_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.2,
+            stream=True
+        )
+        
+        async for chunk in response:
+            if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                text_chunk = {"type": "text", "content": chunk.choices[0].delta.content}
+                yield f"data: {json.dumps(text_chunk)}\n\n"
+                
+    except Exception as e:
+        logger.error(f"Streaming explainer failed: {e}")
+        yield f"data: {json.dumps({'type': 'text', 'content': 'Terdapat masalah teknis dalam menerjemahkan output data.'})}\n\n"
+        
+    logger.info("process_user_query stream finished")

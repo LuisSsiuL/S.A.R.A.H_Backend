@@ -58,3 +58,57 @@ async def execute_query(sql_query: str) -> list[dict]:
     except Exception as e:
         logger.error(f"Unexpected execution error: {e}")
         raise e
+
+async def get_cached_sql(embedding: list[float], threshold: float = 0.95) -> str | None:
+    """
+    Searches the query_cache table using pgvector cosine distance.
+    Returns the cached SQL string if the similarity (1 - distance) is > threshold.
+    """
+    global pool
+    if not pool:
+        logger.warning("Database pool not initialized. Skipping cache check.")
+        return None
+
+    # asyncpg expects the vector as a stringified array
+    vec_str = f"[{','.join(map(str, embedding))}]"
+    
+    query = """
+    SELECT generated_sql 
+    FROM query_cache 
+    WHERE 1 - (message_embedding <=> $1::vector) > $2 
+    ORDER BY message_embedding <=> $1::vector 
+    LIMIT 1
+    """
+    
+    try:
+        async with pool.acquire() as connection:
+            result = await connection.fetchrow(query, vec_str, threshold)
+            if result:
+                logger.info("🎯 Cache HIT: Found semantically similar query.")
+                return result['generated_sql']
+            logger.info("❌ Cache MISS: No similar query found.")
+            return None
+    except Exception as e:
+        logger.error(f"Cache check failed: {e}")
+        return None
+
+
+async def save_to_cache(user_message: str, embedding: list[float], sql: str):
+    """Saves a successfully generated SQL query and its embedding to the cache."""
+    global pool
+    if not pool:
+        return
+
+    vec_str = f"[{','.join(map(str, embedding))}]"
+    
+    query = """
+    INSERT INTO query_cache (user_message, message_embedding, generated_sql)
+    VALUES ($1, $2::vector, $3)
+    """
+    
+    try:
+        async with pool.acquire() as connection:
+            await connection.execute(query, user_message, vec_str, sql)
+            logger.info("💾 Saved query to semantic cache.")
+    except Exception as e:
+        logger.error(f"Failed to save to cache: {e}")
