@@ -34,21 +34,11 @@ SCHEMA_MAPPING = {
     "procurement": PROCUREMENT_SCHEMA
 }
 
+ALL_SCHEMAS = f"{SALES_SCHEMA}\n{INVENTORY_SCHEMA}\n{PROCUREMENT_SCHEMA}"
+
 # ==========================================
 # 2. SYSTEM PROMPTS
 # ==========================================
-
-INTENT_SYSTEM_PROMPT = """You are a classification AI engine for a Business Intelligence platform.
-Your task is to analyze user queries and categorize their intent into one or multiple business domains.
-
-Allowed domains:
-- "sales" (for revenue, customers, orders, employees)
-- "inventory" (for products, categories, stock, warehouses)
-- "procurement" (for purchasing, suppliers, purchase orders)
-
-Return your response strictly as a list of strings formatted as a JSON array. 
-Example Output: ["sales", "inventory"]
-"""
 
 SQL_GENERATION_SYSTEM_PROMPT = """You are an expert PostgreSQL developer for a Business Intelligence system.
 Your job is to generate highly optimized, valid PostgreSQL queries based on the provided schema and user query.
@@ -60,8 +50,7 @@ CRITICAL RULES:
 
 RESPONSE FORMAT (Valid JSON object):
 {
-  "sql": "SELECT ...",
-  "thought_process": "Brief explanation of why you chose these tables/views."
+  "sql": "SELECT ..."
 }
 """
 

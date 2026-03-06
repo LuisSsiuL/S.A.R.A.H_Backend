@@ -4,10 +4,9 @@ import logging
 from openai import AsyncOpenAI
 from database import execute_query
 from prompts import (
-    INTENT_SYSTEM_PROMPT,
     SQL_GENERATION_SYSTEM_PROMPT,
     EXPLAINER_SYSTEM_PROMPT,
-    SCHEMA_MAPPING
+    ALL_SCHEMAS
 )
 
 logger = logging.getLogger("llm_pipeline")
@@ -38,25 +37,6 @@ def clean_json_response(raw_text: str) -> dict:
         text = text[:-len("```")]
     return json.loads(text.strip())
 
-
-async def stage_1_intent_classification(client: AsyncOpenAI, user_message: str) -> list[str]:
-    """Stage 1: Intent & Schema Selection."""
-    try:
-        response = await client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
-                {"role": "system", "content": INTENT_SYSTEM_PROMPT},
-                {"role": "user", "content": user_message}
-            ],
-            temperature=0.0
-        )
-        content = response.choices[0].message.content
-        domains = json.loads(content)
-        return [d.lower() for d in domains if d.lower() in SCHEMA_MAPPING]
-    except Exception as e:
-        logger.error(f"Intent Classification failed: {e}")
-        # Default fallback to all domains if intent classification fails
-        return ["sales", "inventory", "procurement"]
 
 
 async def stage_2_sql_generation(client: AsyncOpenAI, schema_context: str, user_message: str, user_role: str, error_feedback: str = None) -> dict:
@@ -127,6 +107,9 @@ async def process_user_query(message: str, role: str):
     deepseek_client = get_deepseek_client()
     openai_client = get_openai_client()
     
+    # Send instant visual feedback to user
+    yield json.dumps({"type": "text", "content": "⏳ _Memproses permintaan Anda..._\n\n"})
+    
     # 0. Generate Embedding for Semantic Cache
     logger.info("Generating embedding for user message...")
     embedding = None
@@ -156,15 +139,8 @@ async def process_user_query(message: str, role: str):
         # Provide schema context for Explainer
         schema_context = "CACHED_QUERY" 
     else:
-        # --- STAGE 1: INTENT & SCHEMA ---
-        logger.info("Stage 1 started")
-        domains = await stage_1_intent_classification(deepseek_client, message)
-        logger.info(f"Stage 1 finished: {domains}")
-        schema_context = "\n\n".join([SCHEMA_MAPPING.get(d, "") for d in domains])
-        if not schema_context.strip():
-            schema_context = SCHEMA_MAPPING["sales"] # Fallback
-
-        # --- STAGE 2: SQL GENERATION (WITH RETRIES) ---
+        # --- STAGE 1: SQL GENERATION (WITH RETRIES) ---
+        schema_context = ALL_SCHEMAS
         max_retries = 2
         attempt = 0
         error_feedback = None
