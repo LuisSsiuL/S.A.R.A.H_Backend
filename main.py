@@ -83,6 +83,22 @@ async def query_ai(request: QueryRequest):
         logger.error(f"Error handling query: {e}")
         raise HTTPException(status_code=500, detail="Internal server error while processing query.")
 
+@app.get("/api/data/{table_name}")
+async def get_table_data(table_name: str):
+    """
+    Fetches raw table data using the official Supabase client (Standard App Logic).
+    """
+    try:
+        if not supabase_client:
+            raise HTTPException(status_code=500, detail="Supabase client not initialized.")
+        
+        # Standard query to fetch data
+        response = supabase_client.table(table_name).select("*").limit(100).execute()
+        return response.data
+    except Exception as e:
+        logger.error(f"Error fetching table {table_name}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 if __name__ == "__main__":
     import uvicorn
     # Optional logic to run local server automatically on python main.py
