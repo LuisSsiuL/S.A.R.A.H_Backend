@@ -87,15 +87,11 @@ async def stage_4_explainer(client: AsyncOpenAI, user_message: str, data: list[d
     )
     
     content = response.choices[0].message.content
-    try:
-        return clean_json_response(content)
-    except Exception as e:
-        logger.error(f"Failed to parse Explainer response: {e}")
-        # Graceful degradation if LLM fails JSON adherence here
-        return {
-            "text": "Terdapat masalah teknis dalam menerjemahkan output data.",
-            "table": "Error rendering table."
-        }
+    return {
+        "text": content,
+        "table": "",
+        "full_data": data
+    }
 
 
 async def process_user_query(message: str, role: str):
@@ -192,7 +188,8 @@ async def process_user_query(message: str, role: str):
     # Yield Data & SQL Chunk First
     data_chunk = {
         "type": "data",
-        "table": "", # Frontend will handle raw JSON mapping later if we implement it, for now we let Explainer make the markdown
+        "table": "", # Deprecated string table, but kept for compatibility
+        "full_data": query_results, # New raw data passing
         "sql": generated_sql,
         "cache_id": cache_id
     }
@@ -203,7 +200,7 @@ async def process_user_query(message: str, role: str):
     prompt = (
         f"Original Request: {message}\n"
         f"Executed SQL: {generated_sql}\n"
-        f"Query Results: {json.dumps(query_results, default=str)}\n"
+        f"Query Results Snippet (First 5 Rows to capture the vibe): {json.dumps(query_results[:5], default=str)}\n"
     )
 
     try:
