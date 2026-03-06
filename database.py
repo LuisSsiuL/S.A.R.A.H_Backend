@@ -59,7 +59,9 @@ async def execute_query(sql_query: str) -> list[dict]:
         logger.error(f"Unexpected execution error: {e}")
         raise e
 
-async def get_cached_sql(embedding: list[float], threshold: float = 0.95) -> str | None:
+from typing import Optional
+
+async def get_cached_sql(embedding: list[float], threshold: float = 0.95) -> Optional[str]:
     """
     Searches the query_cache table using pgvector cosine distance.
     Returns the cached SQL string if the similarity (1 - distance) is > threshold.

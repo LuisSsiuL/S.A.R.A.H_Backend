@@ -12,11 +12,20 @@ from prompts import (
 
 logger = logging.getLogger("llm_pipeline")
 
-def get_llm_client():
-    """Initialize the AsyncOpenAI client."""
+def get_deepseek_client():
+    """Initialize the AsyncOpenAI client for DeepSeek."""
     api_key = os.getenv("OPENAI_API_KEY")
     base_url = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
     return AsyncOpenAI(api_key=api_key, base_url=base_url)
+
+def get_openai_client():
+    """Initialize the standard AsyncOpenAI client for Embeddings."""
+    # Assuming standard OpenAI key is stored in STANDARD_OPENAI_API_KEY if different, 
+    # but based on common setups we might need to rely on OPENAI_API_KEY if it's dual-purpose.
+    # Let's try standard OPENAI_API_KEY but without forcing the deepseek base url.
+    # We will use the standard openai base url.
+    api_key = os.getenv("STANDARD_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+    return AsyncOpenAI(api_key=api_key, base_url="https://api.openai.com/v1")
 
 def clean_json_response(raw_text: str) -> dict:
     """Helper to try to clean up Markdown-wrapped JSON from LLMs."""
@@ -115,25 +124,28 @@ async def process_user_query(message: str, role: str):
     Yields Server-Sent Events directly.
     """
     logger.info("process_user_query started")
-    client = get_llm_client()
+    deepseek_client = get_deepseek_client()
+    openai_client = get_openai_client()
     
     # 0. Generate Embedding for Semantic Cache
     logger.info("Generating embedding for user message...")
+    embedding = None
     try:
-        embed_res = await client.embeddings.create(
+        embed_res = await openai_client.embeddings.create(
             model="text-embedding-3-small", 
             input=message
         )
         embedding = embed_res.data[0].embedding
     except Exception as e:
-        logger.error(f"Embedding failed: {e}")
-        yield json.dumps({'type': 'text', 'content': 'Gagal membuat vektor pencarian.'})
-        return
+        logger.warning(f"Embedding failed. Skipping cache and falling back to LLM generation. {e}")
 
     # 1. Semantic Cache Check
     logger.info("Checking semantic cache...")
     from database import get_cached_sql, save_to_cache
-    cached_sql = await get_cached_sql(embedding, threshold=0.95)
+    
+    cached_sql = None
+    if embedding is not None:
+        cached_sql = await get_cached_sql(embedding, threshold=0.95)
     
     generated_sql = ""
     if cached_sql:
@@ -143,7 +155,7 @@ async def process_user_query(message: str, role: str):
     else:
         # --- STAGE 1: INTENT & SCHEMA ---
         logger.info("Stage 1 started")
-        domains = await stage_1_intent_classification(client, message)
+        domains = await stage_1_intent_classification(deepseek_client, message)
         logger.info(f"Stage 1 finished: {domains}")
         schema_context = "\n\n".join([SCHEMA_MAPPING.get(d, "") for d in domains])
         if not schema_context.strip():
@@ -158,7 +170,7 @@ async def process_user_query(message: str, role: str):
             try:
                 # Stage 2
                 logger.info(f"Stage 2 started (Attempt {attempt})")
-                sql_response = await stage_2_sql_generation(client, schema_context, message, role, error_feedback)
+                sql_response = await stage_2_sql_generation(deepseek_client, schema_context, message, role, error_feedback)
                 logger.info("Stage 2 finished")
                 generated_sql = sql_response.get("sql", "")
                 
@@ -173,7 +185,8 @@ async def process_user_query(message: str, role: str):
                 test_results = await stage_3_sql_execution(generated_sql)
                 
                 # If we get here, execution succeeded
-                await save_to_cache(message, embedding, generated_sql)
+                if embedding is not None:
+                    await save_to_cache(message, embedding, generated_sql)
                 break 
                 
             except Exception as e:
@@ -214,7 +227,7 @@ async def process_user_query(message: str, role: str):
     )
 
     try:
-        response = await client.chat.completions.create(
+        response = await deepseek_client.chat.completions.create(
             model="deepseek-chat",
             messages=[
                 {"role": "system", "content": EXPLAINER_SYSTEM_PROMPT},
