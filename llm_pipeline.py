@@ -193,7 +193,7 @@ async def process_user_query(message: str, role: str):
         "sql": generated_sql,
         "cache_id": cache_id
     }
-    yield json.dumps(data_chunk)
+    yield json.dumps(data_chunk, default=str)
 
     # --- STAGE 4: EXPLAINER (STREAMING) ---
     logger.info("Stage 4 (Explainer Streaming) started")
