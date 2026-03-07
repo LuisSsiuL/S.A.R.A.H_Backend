@@ -18,12 +18,11 @@ def get_deepseek_client():
     return AsyncOpenAI(api_key=api_key, base_url=base_url)
 
 def get_openai_client():
-    """Initialize the standard AsyncOpenAI client for Embeddings."""
-    # Assuming standard OpenAI key is stored in STANDARD_OPENAI_API_KEY if different, 
-    # but based on common setups we might need to rely on OPENAI_API_KEY if it's dual-purpose.
-    # Let's try standard OPENAI_API_KEY but without forcing the deepseek base url.
-    # We will use the standard openai base url.
-    api_key = os.getenv("STANDARD_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+    """Standard OpenAI client for embeddings."""
+    api_key = os.getenv("STANDARD_OPENAI_API_KEY")
+    if not api_key:
+        logger.warning("STANDARD_OPENAI_API_KEY not found. OpenAI client will be disabled (no embeddings).")
+        return None
     return AsyncOpenAI(api_key=api_key, base_url="https://api.openai.com/v1")
 
 def clean_json_response(raw_text: str) -> dict:
@@ -107,17 +106,20 @@ async def process_user_query(message: str, role: str):
     # Send instant visual feedback to user
     yield json.dumps({"type": "text", "content": "⏳ _Memproses permintaan Anda..._\n\n"})
     
-    # 0. Generate Embedding for Semantic Cache
+    # --- STAGE 1: SEMANTIC CACHE (EMBEDDING) ---
     logger.info("Generating embedding for user message...")
     embedding = None
-    try:
-        embed_res = await openai_client.embeddings.create(
-            model="text-embedding-3-small", 
-            input=message
-        )
-        embedding = embed_res.data[0].embedding
-    except Exception as e:
-        logger.warning(f"Embedding failed. Skipping cache and falling back to LLM generation. {e}")
+    if openai_client:
+        try:
+            embed_res = await openai_client.embeddings.create(
+                model="text-embedding-3-small", 
+                input=message
+            )
+            embedding = embed_res.data[0].embedding
+        except Exception as e:
+            logger.warning(f"Embedding failed. Skipping cache and falling back to LLM generation. {e}")
+    else:
+        logger.info("OpenAI client not initialized. Skipping semantic cache.")
 
     # 1. Semantic Cache Check
     logger.info("Checking semantic cache...")
