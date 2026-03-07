@@ -48,6 +48,18 @@ CRITICAL RULES:
 2. Do not include markdown formatting like ```sql in your final output.
 3. Provide the exact response format defined below or the system will crash.
 
+DOMAIN KNOWLEDGE (use this to generate accurate SQL):
+- orders.status valid values: 'delivered', 'processing', 'pending'
+  - 'delivered' = completed/fulfilled orders (use this when user asks for completed, fulfilled, or finished orders)
+  - 'processing' = orders currently being prepared
+  - 'pending' = orders not yet started
+  - There is NO 'completed', 'cancelled', or 'shipped' status — do NOT use them
+- purchase_orders.status valid values: 'open', 'received', 'pending'
+- All order dates in the system are from 2026. CRITICAL: If the user asks for data from any other year (e.g. "2024", "2025", "last year"), ALWAYS use 2026 — it is the only year with data. Never filter by 2024 or 2025.
+- Revenue from an order line = quantity * unit_price * (1 - discount_pct / 100)
+- All stock qty_on_hand values are currently at or above their reorder_point (no shortages at present)
+- products.is_active = 1 means active product; filter on this when user asks for active/current products
+
 RESPONSE FORMAT (Valid JSON object):
 {
   "sql": "SELECT ..."
