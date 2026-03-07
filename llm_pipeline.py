@@ -1,8 +1,9 @@
 import os
+import re
 import json
 import logging
 from openai import AsyncOpenAI
-from database import execute_query
+from database import execute_query, get_cached_sql, save_to_cache
 from prompts import (
     SQL_GENERATION_SYSTEM_PROMPT,
     EXPLAINER_SYSTEM_PROMPT,
@@ -11,22 +12,36 @@ from prompts import (
 
 logger = logging.getLogger("llm_pipeline")
 
-def get_deepseek_client():
-    """Initialize the AsyncOpenAI client for DeepSeek."""
+# Financial columns that Warehouse Admins must never see — enforced at app level
+_FINANCIAL_COLUMNS = re.compile(
+    r'\b(retail_price|cost_price|unit_price|unit_cost|shipping_cost|discount_pct)\b',
+    re.IGNORECASE
+)
+
+# ---------------------------------------------------------------------------
+# Singleton AI clients — created once at import time, reused across requests
+# ---------------------------------------------------------------------------
+
+def _make_deepseek_client() -> AsyncOpenAI:
     api_key = os.getenv("OPENAI_API_KEY")
     base_url = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
     return AsyncOpenAI(api_key=api_key, base_url=base_url)
 
-def get_openai_client():
-    """Standard OpenAI client for embeddings."""
+
+def _make_openai_client() -> AsyncOpenAI | None:
     api_key = os.getenv("STANDARD_OPENAI_API_KEY")
     if not api_key:
-        logger.warning("STANDARD_OPENAI_API_KEY not found. OpenAI client will be disabled (no embeddings).")
+        logger.warning("STANDARD_OPENAI_API_KEY not found. Embeddings disabled.")
         return None
     return AsyncOpenAI(api_key=api_key, base_url="https://api.openai.com/v1")
 
+
+deepseek_client: AsyncOpenAI = _make_deepseek_client()
+openai_client: AsyncOpenAI | None = _make_openai_client()
+
+
 def clean_json_response(raw_text: str) -> dict:
-    """Helper to try to clean up Markdown-wrapped JSON from LLMs."""
+    """Strip Markdown fences and parse JSON from an LLM response."""
     text = raw_text.strip()
     if text.startswith("```json"):
         text = text[len("```json"):]
@@ -37,16 +52,22 @@ def clean_json_response(raw_text: str) -> dict:
     return json.loads(text.strip())
 
 
-
-async def stage_2_sql_generation(client: AsyncOpenAI, schema_context: str, user_message: str, user_role: str, error_feedback: str = None) -> dict:
+async def stage_2_sql_generation(
+    schema_context: str,
+    user_message: str,
+    user_role: str,
+    error_feedback: str = None
+) -> dict:
     """Stage 2: SQL Generation (handles retries by accepting error_feedback)."""
-    
-    prompt_context = f"Schema Context:\n{schema_context}\n\nUser Role: {user_role}\n\nUser Request: {user_message}"
-    
+    prompt_context = (
+        f"Schema Context:\n{schema_context}\n\n"
+        f"User Role: {user_role}\n\n"
+        f"User Request: {user_message}"
+    )
     if error_feedback:
         prompt_context += f"\n\nPREVIOUS ERROR (Fix this): {error_feedback}"
 
-    response = await client.chat.completions.create(
+    response = await deepseek_client.chat.completions.create(
         model="deepseek-chat",
         messages=[
             {"role": "system", "content": SQL_GENERATION_SYSTEM_PROMPT},
@@ -54,7 +75,7 @@ async def stage_2_sql_generation(client: AsyncOpenAI, schema_context: str, user_
         ],
         temperature=0.0
     )
-    
+
     content = response.choices[0].message.content
     try:
         return clean_json_response(content)
@@ -63,152 +84,121 @@ async def stage_2_sql_generation(client: AsyncOpenAI, schema_context: str, user_
         raise ValueError("LLM returned malformed JSON during SQL generation.")
 
 
-async def stage_3_sql_execution(sql: str) -> list[dict]:
-    """Stage 3: SQL Execution."""
-    return await execute_query(sql)
-
-
-async def stage_4_explainer(client: AsyncOpenAI, user_message: str, data: list[dict], sql: str) -> dict:
-    """Stage 4: Explainer (Markdown & Table)."""
-    prompt = (
-        f"Original Request: {user_message}\n"
-        f"Executed SQL: {sql}\n"
-        f"Query Results: {json.dumps(data, default=str)}\n"
-    )
-
-    response = await client.chat.completions.create(
-        model="deepseek-chat",
-        messages=[
-            {"role": "system", "content": EXPLAINER_SYSTEM_PROMPT},
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.2
-    )
-    
-    content = response.choices[0].message.content
-    return {
-        "text": content,
-        "table": "",
-        "full_data": data
-    }
-
-
 async def process_user_query(message: str, role: str):
     """
-    Orchestrates the Text-to-SQL logic using Semantic Caching and SSE Streaming.
-    Yields Server-Sent Events directly.
+    Orchestrates the Text-to-SQL pipeline with semantic caching and SSE streaming.
+    Yields Server-Sent Events.
     """
-    yield json.dumps({'type': 'text', 'content': '⏳ _Memproses permintaan Anda..._\n\n'})
     logger.info("process_user_query started")
-    deepseek_client = get_deepseek_client()
-    openai_client = get_openai_client()
-    
-    # Send instant visual feedback to user
+
+    # Send instant visual feedback to user (only once)
     yield json.dumps({"type": "text", "content": "⏳ _Memproses permintaan Anda..._\n\n"})
-    
+
     # --- STAGE 1: SEMANTIC CACHE (EMBEDDING) ---
     logger.info("Generating embedding for user message...")
     embedding = None
     if openai_client:
         try:
             embed_res = await openai_client.embeddings.create(
-                model="text-embedding-3-small", 
+                model="text-embedding-3-small",
                 input=message
             )
             embedding = embed_res.data[0].embedding
         except Exception as e:
-            logger.warning(f"Embedding failed. Skipping cache and falling back to LLM generation. {e}")
+            logger.warning(f"Embedding failed. Falling back to LLM generation. {e}")
     else:
         logger.info("OpenAI client not initialized. Skipping semantic cache.")
 
-    # 1. Semantic Cache Check
     logger.info("Checking semantic cache...")
-    from database import get_cached_sql, save_to_cache
-    
     cached_sql = None
     cache_id = None
     if embedding is not None:
         cache_result = await get_cached_sql(embedding, threshold=0.95)
         if cache_result:
             cache_id, cached_sql = cache_result
-    
+
     generated_sql = ""
+    query_results = []
+
     if cached_sql:
         generated_sql = cached_sql
-        # Provide schema context for Explainer
-        schema_context = "CACHED_QUERY" 
     else:
-        # --- STAGE 1: SQL GENERATION (WITH RETRIES) ---
+        # --- STAGE 2: SQL GENERATION (WITH RETRIES) ---
         schema_context = ALL_SCHEMAS
         max_retries = 2
         attempt = 0
         error_feedback = None
-        
+
         while attempt <= max_retries:
             try:
-                # Stage 2
                 logger.info(f"Stage 2 started (Attempt {attempt})")
-                yield json.dumps({'type': 'text', 'content': '⏳ _Menyusun kueri SQL..._\n\n'})
-                
-                sql_response = await stage_2_sql_generation(deepseek_client, schema_context, message, role, error_feedback)
+                yield json.dumps({"type": "text", "content": "⏳ _Menyusun kueri SQL..._\n\n"})
+
+                sql_response = await stage_2_sql_generation(
+                    schema_context, message, role, error_feedback
+                )
                 logger.info("Stage 2 finished")
                 generated_sql = sql_response.get("sql", "")
-                
-                # Sub-check for warehouse admin restriction hit
+
+                # LLM-level access denial (Warehouse Admin financial data)
                 if "Akses ditolak" in generated_sql:
-                    yield json.dumps({'type': 'data', 'table': '', 'sql': 'BLOCKED'})
-                    yield json.dumps({'type': 'text', 'content': generated_sql})
+                    yield json.dumps({"type": "data", "table": "", "sql": "BLOCKED"})
+                    yield json.dumps({"type": "text", "content": generated_sql})
                     return
 
-                # Yield EXACT SQL immediately to the UI
-                yield json.dumps({'type': 'data', 'sql': generated_sql})
+                # App-level enforcement: block financial columns for Warehouse Admin
+                if role.lower() in ("warehouse_admin", "warehouse admin") and _FINANCIAL_COLUMNS.search(generated_sql):
+                    yield json.dumps({"type": "data", "table": "", "sql": "BLOCKED"})
+                    yield json.dumps({"type": "text", "content": "Akses ditolak: Admin Gudang tidak dapat melihat data finansial."})
+                    return
 
-                # Assuming valid syntax, check against DB natively
-                logger.info(f"Stage 3 started (Dry Run / Test)")
-                yield json.dumps({'type': 'text', 'content': '✅ _SQL Berhasil disusun. Menjemput data..._\n\n'})
-                
-                test_results = await stage_3_sql_execution(generated_sql)
-                
-                # If we get here, execution succeeded
+                yield json.dumps({"type": "data", "sql": generated_sql})
+
+                logger.info("Stage 3 started")
+                yield json.dumps({"type": "text", "content": "✅ _SQL Berhasil disusun. Menjemput data..._\n\n"})
+
+                # Execute once — reuse results for the data response below
+                query_results = await execute_query(generated_sql)
+
                 if embedding is not None:
                     cache_id = await save_to_cache(message, embedding, generated_sql)
-                break 
-                
+                break
+
             except Exception as e:
                 error_feedback = str(e)
                 logger.warning(f"SQL Execution failed on attempt {attempt}: {error_feedback}. Retrying...")
                 attempt += 1
 
         if attempt > max_retries and error_feedback:
-            # We failed after retrying
-            yield json.dumps({'type': 'data', 'table': '', 'sql': generated_sql})
-            yield json.dumps({'type': 'text', 'content': f'Maaf, saya gagal menjalankan query setelah 3 percobaan. Error terakhir: {error_feedback}'})
+            yield json.dumps({"type": "data", "table": "", "sql": generated_sql})
+            yield json.dumps({
+                "type": "text",
+                "content": f"Maaf, saya gagal menjalankan query setelah 3 percobaan. Error terakhir: {error_feedback}"
+            })
             return
 
-    # --- STAGE 3: DATA RETRIEVAL ---
-    logger.info("Executing final SQL...")
-    query_results = []
-    try:
-        query_results = await stage_3_sql_execution(generated_sql)
-    except Exception as e:
-        logger.error(f"Final execution failed (perhaps cached query broke): {e}")
-        yield json.dumps({'type': 'text', 'content': 'Error saat menjalankan query dari cache.'})
-        return
+    # --- STAGE 3: DATA RETRIEVAL (only runs for cache hits) ---
+    if cached_sql:
+        logger.info("Executing cached SQL...")
+        try:
+            query_results = await execute_query(generated_sql)
+        except Exception as e:
+            logger.error(f"Cached query execution failed: {e}")
+            yield json.dumps({"type": "text", "content": "Error saat menjalankan query dari cache."})
+            return
 
-    # Yield Raw Data Chunk
-    data_chunk = {
+    yield json.dumps({
         "type": "data",
         "full_data": query_results,
         "cache_id": cache_id
-    }
-    yield json.dumps(data_chunk, default=str)
+    }, default=str)
 
     # --- STAGE 4: EXPLAINER (STREAMING) ---
     logger.info("Stage 4 (Explainer Streaming) started")
     prompt = (
         f"Original Request: {message}\n"
         f"Executed SQL: {generated_sql}\n"
-        f"Query Results Snippet (First 5 Rows to capture the vibe): {json.dumps(query_results[:5], default=str)}\n"
+        f"Query Results Snippet (First 5 Rows): {json.dumps(query_results[:5], default=str)}\n"
     )
 
     try:
@@ -221,14 +211,13 @@ async def process_user_query(message: str, role: str):
             temperature=0.2,
             stream=True
         )
-        
+
         async for chunk in response:
             if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-                text_chunk = {"type": "text", "content": chunk.choices[0].delta.content}
-                yield json.dumps(text_chunk)
-                
+                yield json.dumps({"type": "text", "content": chunk.choices[0].delta.content})
+
     except Exception as e:
         logger.error(f"Streaming explainer failed: {e}")
-        yield json.dumps({'type': 'text', 'content': 'Terdapat masalah teknis dalam menerjemahkan output data.'})
-        
+        yield json.dumps({"type": "text", "content": "Terdapat masalah teknis dalam menerjemahkan output data."})
+
     logger.info("process_user_query stream finished")

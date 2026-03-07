@@ -1,126 +1,157 @@
 import os
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException
+from typing import Annotated
+
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from dotenv import load_dotenv
-
 from supabase import create_client, Client
-from database import init_db_pool, close_db_pool
-from llm_pipeline import process_user_query
 
-# Load Environment Variables
+from database import init_db_pool, close_db_pool, update_feedback
+from llm_pipeline import process_user_query
+from auth import verify_supabase_token
+
+# Allowed table names — prevents IDOR via arbitrary table enumeration
+ALLOWED_TABLES = frozenset({
+    "orders", "order_items", "products", "categories",
+    "customers", "employees", "stock", "warehouses",
+    "suppliers", "purchase_orders", "purchase_order_items",
+})
+
 load_dotenv()
 
-# Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("main")
 
-# Global Supabase Client
 supabase_client: Client = None
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global supabase_client
-    # Startup actions
     logger.info("Starting up FastAPI integration...")
-    
-    # Initialize the official Supabase Client for standard operations
+
     supabase_url = os.getenv("SUPABASE_URL")
-    supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
+    supabase_key = os.getenv("SUPABASE_SECRET_KEY")
     if supabase_url and supabase_key:
         supabase_client = create_client(supabase_url, supabase_key)
         logger.info("Successfully initialized official Supabase client.")
     else:
-        logger.warning("SUPABASE_URL or SUPABASE_SERVICE_KEY missing. Supabase client not initialized.")
-        
-    # Initialize asyncpg connection pool strictly for AI execution
+        logger.warning("SUPABASE_URL or SUPABASE_SECRET_KEY missing. Supabase client not initialized.")
+
     await init_db_pool()
     yield
-    # Shutdown actions
     logger.info("Shutting down FastAPI integration...")
     await close_db_pool()
 
 
-app = FastAPI(title="PJM AI Assistant v2 Backend", lifespan=lifespan)
+app = FastAPI(title="S.A.R.A.H Backend", lifespan=lifespan)
 
-# Configure CORS for React SPA
+# CORS — restrict to known frontend origins
+_raw_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:8080")
+ALLOWED_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=".*",
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+
+# ---------------------------------------------------------------------------
 # API Models
+# ---------------------------------------------------------------------------
+
 class QueryRequest(BaseModel):
     message: str
     role: str = "Sales"
 
+
 class FeedbackRequest(BaseModel):
     cache_id: int
-    feedback_value: int  # e.g., +1 or -1
+    feedback_value: int
 
-class QueryResponse(BaseModel):
-    text: str
-    table: str
-    sql: str
-    database: str
+    @field_validator("feedback_value")
+    @classmethod
+    def must_be_vote(cls, v: int) -> int:
+        if v not in (1, -1):
+            raise ValueError("feedback_value must be 1 or -1")
+        return v
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
 
 @app.get("/api/health")
 async def health_check():
-    """Healthcheck endpoint."""
     return {"status": "healthy"}
 
+
 @app.post("/api/query")
-async def query_ai(request: QueryRequest):
+async def query_ai(
+    request: QueryRequest,
+    _user: Annotated[dict, Depends(verify_supabase_token)],
+):
     """
-    Accepts user question and role, processes via LLM Pipeline against the DB,
-    and returns Server-Sent Events (SSE) streaming.
+    Accepts a natural-language question and streams SSE events.
+    Requires a valid Supabase JWT in the Authorization header.
     """
     try:
         from sse_starlette.sse import EventSourceResponse
-        # EventSourceResponse automatically adds the correct text/event-stream headers
-        # and disables buffering in many ASGI servers.
         return EventSourceResponse(process_user_query(request.message, request.role))
     except Exception as e:
-        logger.error(f"Error handling query stream initialization: {e}")
+        logger.error(f"Error initializing query stream: {e}")
         raise HTTPException(status_code=500, detail="Internal server error while initializing stream.")
 
+
 @app.get("/api/data/{table_name}")
-async def get_table_data(table_name: str):
+async def get_table_data(
+    table_name: str,
+    _user: Annotated[dict, Depends(verify_supabase_token)],
+):
     """
-    Fetches raw table data using the official Supabase client (Standard App Logic).
+    Fetches raw table data from the Supabase client.
+    Only tables in ALLOWED_TABLES may be queried.
     """
+    if table_name not in ALLOWED_TABLES:
+        raise HTTPException(status_code=404, detail="Table not found.")
+
+    if not supabase_client:
+        raise HTTPException(status_code=500, detail="Supabase client not initialized.")
+
     try:
-        if not supabase_client:
-            raise HTTPException(status_code=500, detail="Supabase client not initialized.")
-        
-        # Standard query to fetch data
         response = supabase_client.table(table_name).select("*").limit(100).execute()
         return response.data
     except Exception as e:
         logger.error(f"Error fetching table {table_name}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to fetch table data.")
+
 
 @app.post("/api/feedback")
-async def give_feedback(request: FeedbackRequest):
+async def give_feedback(
+    request: FeedbackRequest,
+    _user: Annotated[dict, Depends(verify_supabase_token)],
+):
     """
-    Accepts feedback (+1 or -1) for a specific query cache ID.
+    Records thumbs-up (+1) or thumbs-down (-1) for a cached query.
     """
     try:
-        from database import update_feedback
         success = await update_feedback(request.cache_id, request.feedback_value)
         if not success:
-            raise HTTPException(status_code=400, detail="Failed to update feedback. Invalid cache ID or database error.")
+            raise HTTPException(status_code=400, detail="Failed to update feedback. Invalid cache ID.")
         return {"status": "success", "message": "Feedback recorded."}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error handling feedback: {e}")
         raise HTTPException(status_code=500, detail="Internal server error while processing feedback.")
 
+
 if __name__ == "__main__":
     import uvicorn
-    # Optional logic to run local server automatically on python main.py
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

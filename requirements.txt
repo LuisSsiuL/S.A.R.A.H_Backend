@@ -7,3 +7,4 @@ python-dotenv>=1.0.1
 supabase>=2.5.0
 gunicorn>=22.0.0
 sse-starlette>=2.1.0
+python-jose[cryptography]>=3.3.0
