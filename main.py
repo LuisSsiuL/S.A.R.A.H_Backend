@@ -90,7 +90,10 @@ async def query_ai(
     """
     try:
         from sse_starlette.sse import EventSourceResponse
-        return EventSourceResponse(process_user_query(request.message, request.role))
+        return EventSourceResponse(
+            process_user_query(request.message, request.role),
+            headers={"X-Accel-Buffering": "no"},
+        )
     except Exception as e:
         logger.error(f"Error initializing query stream: {e}")
         raise HTTPException(status_code=500, detail="Internal server error while initializing stream.")
