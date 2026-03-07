@@ -99,6 +99,7 @@ async def process_user_query(message: str, role: str):
     Orchestrates the Text-to-SQL logic using Semantic Caching and SSE Streaming.
     Yields Server-Sent Events directly.
     """
+    yield json.dumps({'type': 'text', 'content': '⏳ _Memproses permintaan Anda..._\n\n'})
     logger.info("process_user_query started")
     deepseek_client = get_deepseek_client()
     openai_client = get_openai_client()
@@ -145,6 +146,8 @@ async def process_user_query(message: str, role: str):
             try:
                 # Stage 2
                 logger.info(f"Stage 2 started (Attempt {attempt})")
+                yield json.dumps({'type': 'text', 'content': '⏳ _Menyusun kueri SQL..._\n\n'})
+                
                 sql_response = await stage_2_sql_generation(deepseek_client, schema_context, message, role, error_feedback)
                 logger.info("Stage 2 finished")
                 generated_sql = sql_response.get("sql", "")
@@ -155,8 +158,13 @@ async def process_user_query(message: str, role: str):
                     yield json.dumps({'type': 'text', 'content': generated_sql})
                     return
 
+                # Yield EXACT SQL immediately to the UI
+                yield json.dumps({'type': 'data', 'sql': generated_sql})
+
                 # Assuming valid syntax, check against DB natively
                 logger.info(f"Stage 3 started (Dry Run / Test)")
+                yield json.dumps({'type': 'text', 'content': '✅ _SQL Berhasil disusun. Menjemput data..._\n\n'})
+                
                 test_results = await stage_3_sql_execution(generated_sql)
                 
                 # If we get here, execution succeeded
@@ -185,12 +193,10 @@ async def process_user_query(message: str, role: str):
         yield json.dumps({'type': 'text', 'content': 'Error saat menjalankan query dari cache.'})
         return
 
-    # Yield Data & SQL Chunk First
+    # Yield Raw Data Chunk
     data_chunk = {
         "type": "data",
-        "table": "", # Deprecated string table, but kept for compatibility
-        "full_data": query_results, # New raw data passing
-        "sql": generated_sql,
+        "full_data": query_results,
         "cache_id": cache_id
     }
     yield json.dumps(data_chunk, default=str)
