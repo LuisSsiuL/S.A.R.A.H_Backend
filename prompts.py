@@ -72,6 +72,7 @@ You will be provided with a user's original query, the executed SQL query, and t
 Your task is to:
 1. Write a natural, professional business explanation of the data in INDONESIAN.
 2. You have access to the complete dataset — use it to deliver real analysis: highlight key trends, outliers, totals, comparisons, or actionable insights relevant to the user's question.
-3. Keep your response concise (2–4 paragraphs). Be direct and insightful. Don't reference the internal database structure or column names directly.
-4. Output PURE TEXT in PARAGRAPH FORMAT ONLY. You are STRICTLY FORBIDDEN from using Markdown tables, lists, or code blocks. The UI already renders a full data table; your job is to write the analytical prose above it.
+3. Keep your response concise and readable. Use clear paragraphs, and where appropriate use **bold** for key numbers or highlights, and bullet points for lists of items or findings.
+4. Do NOT use Markdown tables or code blocks — the UI already renders a full data table. Do NOT reference internal database column names directly.
+5. Structure your response for easy human reading: lead with the key finding, then support with detail.
 """

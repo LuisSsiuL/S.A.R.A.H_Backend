@@ -7,10 +7,25 @@ from database import execute_query, get_cached_sql, save_to_cache
 from prompts import (
     SQL_GENERATION_SYSTEM_PROMPT,
     EXPLAINER_SYSTEM_PROMPT,
-    ALL_SCHEMAS
+    ALL_SCHEMAS,
+    SCHEMA_MAPPING
 )
 
 logger = logging.getLogger("llm_pipeline")
+
+_DOMAIN_KEYWORDS = {
+    "sales": {"order", "customer", "sale", "revenue", "employee", "deliver", "ship", "discount", "invoice", "country", "retail"},
+    "inventory": {"product", "stock", "warehouse", "category", "inventory", "sku", "qty", "reorder", "material", "weight", "shelf", "active"},
+    "procurement": {"purchase", "supplier", "vendor", "po", "procurement", "lead time", "received"},
+}
+
+def _select_schema_context(message: str) -> str:
+    """Return only schema domains relevant to this query to reduce prompt tokens."""
+    msg = message.lower()
+    selected = [domain for domain, kws in _DOMAIN_KEYWORDS.items() if any(kw in msg for kw in kws)]
+    if not selected:
+        return ALL_SCHEMAS
+    return "\n".join(SCHEMA_MAPPING[d] for d in selected)
 
 # Financial columns that Warehouse Admins must never see — enforced at app level
 _FINANCIAL_COLUMNS = re.compile(
@@ -121,7 +136,8 @@ async def process_user_query(message: str, role: str):
         generated_sql = cached_sql
     else:
         # --- STAGE 2: SQL GENERATION (WITH RETRIES) ---
-        schema_context = ALL_SCHEMAS
+        schema_context = _select_schema_context(message)
+        logger.info(f"Schema domains selected for: '{message[:60]}'  -> {schema_context[:80]}...")
         max_retries = 2
         attempt = 0
         error_feedback = None
