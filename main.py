@@ -48,13 +48,7 @@ app = FastAPI(title="PJM AI Assistant v2 Backend", lifespan=lifespan)
 # Configure CORS for React SPA
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:8080",
-        "http://localhost:5173",
-        "http://localhost:3000",
-        "https://sarahchatbot.com",
-        "https://www.sarahchatbot.com"
-    ],
+    allow_origin_regex=".*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
