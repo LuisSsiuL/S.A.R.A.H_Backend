@@ -129,6 +129,23 @@ async def save_to_cache(user_message: str, embedding: list[float], sql: str) -> 
         return None
 
 
+async def fetch_table_data(table_name: str, limit: int = 100) -> list[dict]:
+    """Fetches rows from a table using asyncpg. Used by the /api/data endpoint."""
+    global pool
+    if not pool:
+        raise Exception("Database pool is not initialized.")
+
+    # table_name is already validated against ALLOWED_TABLES in main.py
+    query = f'SELECT * FROM "{table_name}" LIMIT $1'
+    try:
+        async with pool.acquire() as connection:
+            records = await connection.fetch(query, limit)
+            return [dict(record) for record in records]
+    except asyncpg.PostgresError as e:
+        logger.error(f"Failed to fetch table {table_name}: {e}")
+        raise e
+
+
 async def update_feedback(cache_id: int, feedback_value: int) -> bool:
     """Updates the feedback score for a cached query (+1/-1)."""
     global pool

@@ -7,9 +7,8 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 from dotenv import load_dotenv
-from supabase import create_client, Client
 
-from database import init_db_pool, close_db_pool, update_feedback
+from database import init_db_pool, close_db_pool, update_feedback, fetch_table_data
 from llm_pipeline import process_user_query
 from auth import verify_supabase_token
 
@@ -25,22 +24,10 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("main")
 
-supabase_client: Client = None
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global supabase_client
     logger.info("Starting up FastAPI integration...")
-
-    supabase_url = os.getenv("SUPABASE_URL")
-    supabase_key = os.getenv("SUPABASE_SECRET_KEY")
-    if supabase_url and supabase_key:
-        supabase_client = create_client(supabase_url, supabase_key)
-        logger.info("Successfully initialized official Supabase client.")
-    else:
-        logger.warning("SUPABASE_URL or SUPABASE_SECRET_KEY missing. Supabase client not initialized.")
-
     await init_db_pool()
     yield
     logger.info("Shutting down FastAPI integration...")
@@ -115,18 +102,15 @@ async def get_table_data(
     _user: Annotated[dict, Depends(verify_supabase_token)],
 ):
     """
-    Fetches raw table data from the Supabase client.
+    Fetches raw table data via asyncpg connection pool.
     Only tables in ALLOWED_TABLES may be queried.
     """
     if table_name not in ALLOWED_TABLES:
         raise HTTPException(status_code=404, detail="Table not found.")
 
-    if not supabase_client:
-        raise HTTPException(status_code=500, detail="Supabase client not initialized.")
-
     try:
-        response = supabase_client.table(table_name).select("*").limit(100).execute()
-        return response.data
+        data = await fetch_table_data(table_name)
+        return data
     except Exception as e:
         logger.error(f"Error fetching table {table_name}: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch table data.")
