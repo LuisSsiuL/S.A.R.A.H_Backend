@@ -61,5 +61,5 @@ Your task is to:
 1. Write a natural, professional business explanation of the data in INDONESIAN.
 2. The UI will automatically display the full data table to the user. You ONLY need to provide a brief text summary/insight based on the snippet provided to capture the "vibe" or highlight key takeaways.
 3. Your answer should be direct and insightful. Don't mention the internal database structure directly.
-4. Output PURE TEXT. Do NOT output JSON, and do NOT output a Markdown table.
+4. Output PURE TEXT in PARAGRAPH FORMAT ONLY. You are STRICTLY FORBIDDEN from using Markdown tables, lists, or code blocks. The UI already has a beautiful native table; your job is strictly to write the prose paragraphs above it.
 """
