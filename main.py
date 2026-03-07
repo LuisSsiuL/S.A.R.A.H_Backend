@@ -48,7 +48,12 @@ app = FastAPI(title="PJM AI Assistant v2 Backend", lifespan=lifespan)
 # Configure CORS for React SPA
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # For production, restrict this to the Cloudflare pages domain
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "https://sarahchatbot.com",
+        "https://www.sarahchatbot.com"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
