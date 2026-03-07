@@ -40,8 +40,12 @@ async def execute_query(sql_query: str) -> list[dict]:
     Returns the mapped dictionary of results.
     """
     global pool
+    import re
     
-    if "insert" in sql_query.lower() or "update" in sql_query.lower() or "delete" in sql_query.lower() or "drop" in sql_query.lower():
+    # Use word boundaries so that 'last_updated' doesn't trigger 'update'
+    forbidden_pattern = re.compile(r'\b(insert|update|delete|drop|alter|truncate|grant|revoke)\b', re.IGNORECASE)
+    
+    if forbidden_pattern.search(sql_query):
         raise Exception("Security Error: Only SELECT queries are permitted.")
 
     if not pool:
