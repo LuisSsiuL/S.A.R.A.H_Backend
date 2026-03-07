@@ -91,9 +91,6 @@ async def process_user_query(message: str, role: str):
     """
     logger.info("process_user_query started")
 
-    # Send instant visual feedback to user (only once)
-    yield json.dumps({"type": "text", "content": "⏳ _Memproses permintaan Anda..._\n\n"})
-
     # --- STAGE 1: SEMANTIC CACHE (EMBEDDING) ---
     logger.info("Generating embedding for user message...")
     embedding = None
@@ -132,8 +129,6 @@ async def process_user_query(message: str, role: str):
         while attempt <= max_retries:
             try:
                 logger.info(f"Stage 2 started (Attempt {attempt})")
-                yield json.dumps({"type": "text", "content": "⏳ _Menyusun kueri SQL..._\n\n"})
-
                 sql_response = await stage_2_sql_generation(
                     schema_context, message, role, error_feedback
                 )
@@ -155,8 +150,6 @@ async def process_user_query(message: str, role: str):
                 yield json.dumps({"type": "data", "sql": generated_sql})
 
                 logger.info("Stage 3 started")
-                yield json.dumps({"type": "text", "content": "✅ _SQL Berhasil disusun. Menjemput data..._\n\n"})
-
                 # Execute once — reuse results for the data response below
                 query_results = await execute_query(generated_sql)
 
@@ -195,10 +188,25 @@ async def process_user_query(message: str, role: str):
 
     # --- STAGE 4: EXPLAINER (STREAMING) ---
     logger.info("Stage 4 (Explainer Streaming) started")
+
+    # Build data context: include all rows, but cap JSON size to avoid huge prompts
+    MAX_DATA_CHARS = 12000
+    full_json = json.dumps(query_results, default=str)
+    if len(full_json) <= MAX_DATA_CHARS:
+        data_context = full_json
+        data_note = f"[{len(query_results)} rows total — full dataset]"
+    else:
+        # Trim rows until it fits
+        trimmed = query_results[:]
+        while trimmed and len(json.dumps(trimmed, default=str)) > MAX_DATA_CHARS:
+            trimmed = trimmed[:-10]
+        data_context = json.dumps(trimmed, default=str)
+        data_note = f"[Showing {len(trimmed)} of {len(query_results)} rows due to size]"
+
     prompt = (
         f"Original Request: {message}\n"
         f"Executed SQL: {generated_sql}\n"
-        f"Query Results Snippet (First 5 Rows): {json.dumps(query_results[:5], default=str)}\n"
+        f"Query Results {data_note}:\n{data_context}\n"
     )
 
     try:
