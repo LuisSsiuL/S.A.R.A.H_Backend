@@ -16,9 +16,11 @@ logger = logging.getLogger("llm_pipeline")
 _DOMAIN_KEYWORDS = {
     "sales": {
         # English
-        "order", "customer", "sale", "revenue", "employee", "deliver", "ship", "discount", "invoice", "country", "retail",
+        "order", "customer", "sale", "sales", "revenue", "employee", "deliver", "ship", "discount", "invoice", "country", "retail",
+        "sold", "sell", "selling", "bought", "purchase history", "transaction",
         # Indonesian
         "pesanan", "pelanggan", "penjualan", "pendapatan", "karyawan", "pengiriman", "diskon", "faktur", "terjual", "pembeli",
+        "transaksi", "beli", "dibeli",
     },
     "inventory": {
         # English
