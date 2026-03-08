@@ -14,18 +14,42 @@ from prompts import (
 logger = logging.getLogger("llm_pipeline")
 
 _DOMAIN_KEYWORDS = {
-    "sales": {"order", "customer", "sale", "revenue", "employee", "deliver", "ship", "discount", "invoice", "country", "retail"},
-    "inventory": {"product", "stock", "warehouse", "category", "inventory", "sku", "qty", "reorder", "material", "weight", "shelf", "active"},
-    "procurement": {"purchase", "supplier", "vendor", "po", "procurement", "lead time", "received"},
+    "sales": {
+        # English
+        "order", "customer", "sale", "revenue", "employee", "deliver", "ship", "discount", "invoice", "country", "retail",
+        # Indonesian
+        "pesanan", "pelanggan", "penjualan", "pendapatan", "karyawan", "pengiriman", "diskon", "faktur", "terjual", "pembeli",
+    },
+    "inventory": {
+        # English
+        "product", "stock", "warehouse", "category", "inventory", "sku", "qty", "reorder", "material", "weight", "shelf", "active",
+        # Indonesian
+        "produk", "stok", "gudang", "kategori", "inventori", "persediaan", "barang", "aktif", "berat",
+    },
+    "procurement": {
+        # English
+        "purchase", "supplier", "vendor", "po", "procurement", "lead time", "received",
+        # Indonesian
+        "pembelian", "pemasok", "pengadaan", "diterima", "pemesanan",
+    },
+}
+
+# Cross-domain FK dependencies: order_items.product_id → products, purchase_order_items.product_id → products
+_SCHEMA_DEPENDENCIES: dict[str, set[str]] = {
+    "sales": {"inventory"},
+    "procurement": {"inventory"},
 }
 
 def _select_schema_context(message: str) -> str:
     """Return only schema domains relevant to this query to reduce prompt tokens."""
     msg = message.lower()
-    selected = [domain for domain, kws in _DOMAIN_KEYWORDS.items() if any(kw in msg for kw in kws)]
+    selected: set[str] = {domain for domain, kws in _DOMAIN_KEYWORDS.items() if any(kw in msg for kw in kws)}
     if not selected:
         return ALL_SCHEMAS
-    return "\n".join(SCHEMA_MAPPING[d] for d in selected)
+    # Expand with FK dependencies so cross-domain joins (e.g. products in sales queries) always work
+    for domain in list(selected):
+        selected |= _SCHEMA_DEPENDENCIES.get(domain, set())
+    return "\n".join(SCHEMA_MAPPING[d] for d in ("sales", "inventory", "procurement") if d in selected)
 
 # Financial columns that Warehouse Admins must never see — enforced at app level
 _FINANCIAL_COLUMNS = re.compile(
